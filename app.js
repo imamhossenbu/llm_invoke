@@ -1,65 +1,173 @@
 import Groq from "groq-sdk";
-import Instructor from "@instructor-ai/instructor";
-import { z } from "zod";
+import readline from "readline";
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
 
-// const client = Instructor({
-//   client: groq,
-// });
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
-// const SentimentSchema = z.object({
-//   sentiment: z.enum(["positive", "negative", "neutral"]),
-// });
+/**
+ * ------------------------
+ * Tavily Search
+ * ------------------------
+ */
+async function tavilySearch(query) {
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${TAVILY_API_KEY}`,
+    },
+    body: JSON.stringify({
+      query,
+      search_depth: "basic",
+      include_answer: true,
+    }),
+  });
 
+  const data = await response.json();
+
+  return (
+    data.answer ||
+    data.results?.map((r) => r.content).join("\n") ||
+    "No result found"
+  );
+}
+
+/**
+ * ------------------------
+ * Agent
+ * ------------------------
+ */
+async function runAgent(messages) {
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.3-70b-versatile",
+
+    messages: [
+      {
+        role: "system",
+        content: `
+You are a helpful AI assistant.
+
+RULES:
+1. If web search needed respond ONLY in this format:
+SEARCH: search query
+
+2. Do NOT explain before SEARCH
+
+3. For normal chat respond normally.
+
+Examples:
+
+User: weather in chittagong
+Assistant: SEARCH: current weather in chittagong
+
+User: who is messi
+Assistant: Lionel Messi is a footballer.
+        `,
+      },
+
+      ...messages,
+    ],
+  });
+
+
+  return completion.choices[0].message.content;
+}
+
+/**
+ * ------------------------
+ * Readline
+ * ------------------------
+ */
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+function ask(question) {
+  return new Promise((resolve) => {
+    rl.question(question, resolve);
+  });
+}
+
+/**
+ * ------------------------
+ * Main Loop
+ * ------------------------
+ */
 async function main() {
+  const messages = [];
 
-    const res = await groq.chat.completions.create({
-      response_format: { type: "json_object" },
-      model: "llama-3.3-70b-versatile",
+  while (true) {
+    const userInput = await ask("\nYou: ");
 
-      messages: [
-        {
-          role: "system",
-          content: `You are an interview grader assistant. Your task is to generate candidate evaluation score. Output must be follwing JSON structure:
-            {
-            "confidence":number (1-10 scale),
-            "accuracy":number (1-10 scale),
-            "pass":bollean(true or false)
-            }
-            The response must:
-            1. Include all fields shown above
-            2. Use only the exact field names shown,
-            3. Follow the exact data types specified
-            4. Contain ONLY the JSON object and nothing else
-            `,
-        },
-        {
-          role: "user",
-          content: `
-            Q: What dores === don in Javascript?
-            A: It checks strict equality-both value and type match.
+    if (userInput.toLowerCase() === "exit") {
+      break;
+    }
 
-            Q: How do you create a promise that resolves after 1 second?
-            A: const p = new Promise (r=> setTimeout(r,1000));
-
-            Q: What is hoisting?
-            A: Javascript moves declarations (but not initializations) to the top of their scope before code runs.
-
-
-            Q: Why use let instead of var?
-            A: Let is block-scoped, avoiding the function-scope quirks and re-declaration issues of var.
-            `,
-        },
-      ],
+    messages.push({
+      role: "user",
+      content: userInput,
     });
 
-    const content = res?.choices?.[0]?.message?.content;
+    const response = await runAgent(messages);
 
-    console.log(content)
-  
+
+    /**
+     * ------------------------
+     * SEARCH FLOW
+     * ------------------------
+     */
+    if (response.startsWith("SEARCH:")) {
+      const query = response.replace("SEARCH:", "").trim();
+
+      console.log("\n🔎 Searching:", query);
+
+      const searchResult = await tavilySearch(query);
+
+      messages.push({
+        role: "assistant",
+        content: response,
+      });
+
+      messages.push({
+        role: "user",
+        content: `
+Web Search Result:
+${searchResult}
+
+Now answer the user properly.
+        `,
+      });
+
+      const finalAnswer = await runAgent(messages);
+
+      console.log("\nAI:", finalAnswer);
+
+      messages.push({
+        role: "assistant",
+        content: finalAnswer,
+      });
+
+      continue;
+    }
+
+    /**
+     * ------------------------
+     * NORMAL CHAT
+     * ------------------------
+     */
+    console.log("\nAI:", response);
+
+    messages.push({
+      role: "assistant",
+      content: response,
+    });
+  }
+
+  rl.close();
 }
 
 main();
-
-
